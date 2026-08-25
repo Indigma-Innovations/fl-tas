@@ -1,0 +1,3 @@
+httpx>=0.28.1
+pynacl>=1.6.2
+tenseal==0.3.16

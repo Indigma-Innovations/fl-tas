@@ -1,0 +1,608 @@
+openapi: 3.0.3
+
+info:
+  title: TAS Service API
+  version: "0.2.0"
+  description: |
+    TAS (TEE-emulated) service for `fedavg_tas` mode.
+
+    Notes:
+    - Some POST endpoints are intended to be restricted by source IP using `TAS_ALLOWED_ORCH_IP`.
+    - `/v1/test-aggregate` is a public test endpoint: it decrypts sealed-box encrypted JSON vectors and returns plaintext aggregation.
+    - Optional FHE (CKKS via Microsoft SEAL) endpoints are enabled only when the server is built with `-DTAS_ENABLE_SEAL=ON`.
+      When disabled, `/v1/fhe/*` routes do not exist.
+
+servers:
+  - url: http://127.0.0.1:9000
+
+tags:
+  - name: Public
+  - name: Sessions
+  - name: Orchestrator
+  - name: Spec
+  - name: FHE
+
+paths:
+  /v1/health:
+    get:
+      tags: [Public]
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                required: [status]
+
+  /v1/key-info:
+    get:
+      tags: [Public]
+      summary: Get key metadata
+      description: Returns current TAS public key metadata so clients can verify key hash.
+      responses:
+        "200":
+          description: Key info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyInfo"
+
+  /v1/public-key:
+    get:
+      tags: [Public]
+      summary: Download raw public key bytes
+      description: Returns the raw X25519 public key bytes (32 bytes).
+      responses:
+        "200":
+          description: Public key bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /v1/test-aggregate:
+    post:
+      tags: [Public]
+      summary: Test aggregation (decrypt sealed-box vectors + aggregate)
+      description: |
+        Public test endpoint.
+        - Each ciphertext is a libsodium sealed box ciphertext (to the TAS X25519 public key), base64-encoded.
+        - The decrypted plaintext must be a UTF-8 JSON array of numbers, e.g. `[1.0,2.0,3.0]`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TestAggregateRequest"
+            examples:
+              mean_example:
+                summary: Mean of two encrypted vectors
+                value:
+                  op: mean
+                  ciphertexts:
+                    - "BASE64_CIPHERTEXT_1"
+                    - "BASE64_CIPHERTEXT_2"
+                  max_dim: 100000
+      responses:
+        "200":
+          description: Aggregation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TestAggregateResponse"
+        "400":
+          description: Invalid request / decrypt failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/sessions:
+    post:
+      tags: [Orchestrator]
+      summary: Create a TAS session (restricted by IP)
+      description: |
+        Creates a new session directory layout under `${TAS_DATA_DIR}/sessions/{tas_session_id}`.
+        Intended to be called only by the orchestrator (enforced via `TAS_ALLOWED_ORCH_IP`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              create_session:
+                value:
+                  job_id: job-123
+                  window_id: round-1
+                  buffer_target: 10
+                  min_k: 7
+                  clip_norm: null
+                  expected_format: safetensors
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+        "403":
+          description: Forbidden (IP not allowed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Invalid JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/sessions/{tas_session_id}/inputs:
+    post:
+      tags: [Orchestrator]
+      summary: Submit an input reference (restricted by IP)
+      description: |
+        Stores an input metadata JSON file at:
+        `${TAS_DATA_DIR}/sessions/{tas_session_id}/inputs/{submission_id}.meta.json`
+
+        Intended to be called only by the orchestrator (enforced via `TAS_ALLOWED_ORCH_IP`).
+      parameters:
+        - $ref: "#/components/parameters/TasSessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitInputRequest"
+            examples:
+              submit_input_url:
+                value:
+                  submission_id: sub-001
+                  client_id: client-abc
+                  ciphertext_download_url: https://example.com/path/to/update.bin
+                  encrypted: true
+                  sha256: "..."
+              submit_input_inline_b64:
+                value:
+                  submission_id: sub-002
+                  ciphertext_b64: "BASE64_CIPHERTEXT"
+                  weight: 1234
+      responses:
+        "200":
+          description: Input accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitInputResponse"
+        "403":
+          description: Forbidden (IP not allowed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Invalid JSON / missing submission_id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/sessions/{tas_session_id}/summary:
+    get:
+      tags: [Sessions]
+      summary: Get session summary (public)
+      parameters:
+        - $ref: "#/components/parameters/TasSessionId"
+      responses:
+        "200":
+          description: Session summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSummary"
+
+  /v1/sessions/{tas_session_id}/finalize:
+    post:
+      tags: [Orchestrator]
+      summary: Fetch aggregated model file (restricted by IP)
+      description: |
+        Returns the aggregated `.safetensors` file if present at:
+        `${TAS_DATA_DIR}/sessions/{tas_session_id}/aggregate/aggregated.safetensors`
+
+        Intended to be called only by the orchestrator (enforced via `TAS_ALLOWED_ORCH_IP`).
+      parameters:
+        - $ref: "#/components/parameters/TasSessionId"
+      responses:
+        "200":
+          description: Aggregated safetensors file
+          headers:
+            X-TAS-Aggregate-Sha256:
+              description: SHA256 of returned aggregate (may be empty if not computed).
+              schema:
+                type: string
+            X-TAS-Num-Contributions:
+              description: Number of contributions used (may be 0 if not computed).
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: Forbidden (IP not allowed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Buffer target not met / aggregate missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinalizeConflict"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # Optional FHE endpoints (exist only with TAS_ENABLE_SEAL=ON)
+  /v1/fhe/key-info:
+    get:
+      tags: [ FHE ]
+      summary: Get FHE public materials metadata (CKKS)
+      description: |
+        Returns CKKS parameters and metadata for downloadable public blobs.
+        Large blobs are NOT returned inline; download them via /v1/fhe/blobs/{name}.
+      responses:
+        "200":
+          description: FHE key info (metadata + blob hashes/sizes)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FheKeyInfoResponse"
+
+  /v1/fhe/blobs/{name}:
+    get:
+      tags: [ FHE ]
+      summary: Download an FHE blob
+      description: |
+        Downloads one of the FHE blobs as raw bytes (application/octet-stream).
+        Names:
+          - params
+          - public_key
+          - relin_keys
+          - galois_keys
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [ params, public_key, relin_keys, galois_keys ]
+      responses:
+        "200":
+          description: Blob bytes
+          headers:
+            X-FHE-Blob-Name:
+              schema: { type: string }
+            X-FHE-Blob-Sha256:
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Unknown blob / missing blob
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/fhe/decrypt:
+    post:
+      tags: [ FHE ]
+      summary: Decrypt a CKKS ciphertext (restricted by IP)
+      description: |
+        Restricted endpoint (by `TAS_ALLOWED_ORCH_IP`) that decrypts a CKKS ciphertext
+        and returns the decoded vector.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FheDecryptRequest"
+      responses:
+        "200":
+          description: Decrypted vector
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FheDecryptResponse"
+        "403":
+          description: Forbidden (IP not allowed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Key hash mismatch or vector length mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # Docs/spec serving (static files)
+  /docs:
+    get:
+      tags: [Spec]
+      summary: Swagger UI HTML
+      description: Serves `spec/swagger.html` if present.
+      responses:
+        "200":
+          description: HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Not found
+
+  /spec/openapi.yaml:
+    get:
+      tags: [Spec]
+      summary: OpenAPI spec (YAML)
+      description: Serves `spec/openapi.yaml` if present.
+      responses:
+        "200":
+          description: YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "404":
+          description: Not found
+
+components:
+  parameters:
+    TasSessionId:
+      name: tas_session_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: TAS session identifier
+
+  schemas:
+    KeyInfo:
+      type: object
+      properties:
+        key_id:
+          type: string
+          description: Key identifier (currently equals public_key_hash).
+        public_key_b64:
+          type: string
+          description: Base64-encoded public key bytes.
+        public_key_hash:
+          type: string
+          description: SHA256 hex digest of the raw public key bytes.
+        created_at:
+          type: string
+          description: Creation timestamp or label.
+        algorithm:
+          type: string
+          example: x25519_sealed_box_v1
+      required: [key_id, public_key_b64, public_key_hash, created_at, algorithm]
+
+    TestAggregateRequest:
+      type: object
+      properties:
+        op:
+          type: string
+          enum: [sum, mean]
+          default: sum
+        ciphertexts:
+          type: array
+          items:
+            type: string
+            description: Base64 sealed-box ciphertext
+          minItems: 1
+        max_dim:
+          type: integer
+          minimum: 1
+          default: 200000
+      required: [ciphertexts]
+
+    TestAggregateResponse:
+      type: object
+      properties:
+        op:
+          type: string
+          enum: [sum, mean]
+        count:
+          type: integer
+          minimum: 1
+        dim:
+          type: integer
+          minimum: 0
+        result:
+          type: array
+          items:
+            type: number
+      required: [op, count, dim, result]
+
+    CreateSessionRequest:
+      type: object
+      description: Session metadata (stored as-is in meta.json).
+      additionalProperties: true
+
+    CreateSessionResponse:
+      type: object
+      properties:
+        tas_session_id:
+          type: string
+        key_hash:
+          type: string
+          description: Public key hash (SHA256 hex) for client verification.
+        created_at:
+          type: string
+      required: [tas_session_id, key_hash, created_at]
+
+    SubmitInputRequest:
+      type: object
+      description: Input metadata; must include submission_id.
+      properties:
+        submission_id:
+          type: string
+      required: [submission_id]
+      additionalProperties: true
+
+    SubmitInputResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        received:
+          type: integer
+        buffer_target:
+          type: integer
+      required: [ok, received, buffer_target]
+
+    SessionSummary:
+      type: object
+      properties:
+        tas_session_id:
+          type: string
+        status:
+          type: string
+          example: OPEN
+        received:
+          type: integer
+        buffer_target:
+          type: integer
+        contributions:
+          type: array
+          items: {}
+      required: [tas_session_id, status, received, buffer_target, contributions]
+
+    FinalizeConflict:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: buffer_not_met
+        reason:
+          type: string
+          example: aggregate_missing
+        received:
+          type: integer
+        target:
+          type: integer
+      required: [detail, reason, received, target]
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+        error:
+          type: string
+        reason:
+          type: string
+        remote_ip:
+          type: string
+      required: [detail]
+
+    # FHE
+    FheBlobMeta:
+      type: object
+      properties:
+        sha256:
+          type: string
+          description: SHA256 hex digest of the blob bytes.
+        size:
+          type: integer
+          format: int64
+          description: Blob size in bytes.
+      required: [ sha256, size ]
+
+    FheKeyInfoResponse:
+      type: object
+      properties:
+        scheme: { type: string, example: ckks }
+        algorithm: { type: string, example: ckks_seal_v1 }
+        key_hash:
+          type: string
+          description: Hash identifying the current FHE public materials.
+        created_at: { type: string }
+        params:
+          type: object
+          properties:
+            poly_modulus_degree: { type: integer, example: 8192 }
+            coeff_modulus_bits:
+              type: array
+              items: { type: integer }
+              example: [ 60, 40, 40, 60 ]
+            scale_bits: { type: integer, example: 40 }
+          required: [ poly_modulus_degree, coeff_modulus_bits, scale_bits ]
+        blobs:
+          type: object
+          properties:
+            public_key: { $ref: "#/components/schemas/FheBlobMeta" }
+            relin_keys: { $ref: "#/components/schemas/FheBlobMeta" }
+            galois_keys: { $ref: "#/components/schemas/FheBlobMeta" }
+            params: { $ref: "#/components/schemas/FheBlobMeta" }
+          required: [ public_key, relin_keys, galois_keys, params ]
+      required: [ scheme, algorithm, key_hash, created_at, params, blobs ]
+
+    FheDecryptRequest:
+      type: object
+      properties:
+        key_hash: { type: string }
+        ciphertext_b64:
+          type: string
+          description: Base64-encoded serialized SEAL Ciphertext (CKKS).
+        expected_vector_len:
+          type: integer
+          minimum: 0
+          description: Optional. If > 0, server enforces decoded vector length.
+      required: [ key_hash, ciphertext_b64 ]
+
+    FheDecryptResponse:
+      type: object
+      properties:
+        key_hash: { type: string }
+        plaintext_vector:
+          type: array
+          items: { type: number }
+      required: [ key_hash, plaintext_vector ]

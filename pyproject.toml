@@ -1,0 +1,33 @@
+[project]
+name = "fl-tas"
+version = "0.1.0"
+description = "TAS service for averaging models using FedAvg"
+authors = [
+    { name = "Indigma Innovations", email = "info@indigma.eu" },
+]
+keywords = ["federated learning", "secure aggregation", "public-key cryptography", "fully homomorphic encryption", "X25519", "CKKS"]
+requires-python = ">=3.13"
+readme = "README.md"
+license = "Apache-2.0"
+dependencies = [
+    "numpy>=2.5.2",
+    "safetensors>=0.8.0",
+    "torch>=2.13.0",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu" }
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pynacl>=1.6.2",
+    "tenseal==0.3.16",
+]
